@@ -8,12 +8,15 @@ import qualified Data.ByteString.Char8 as BC
 import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Database.Redis as R
-import Network.URI (URI, parseURI)
+import qualified Network.URI as U (URI, parseURI)
 import qualified System.Random as SR
 import Web.Scotty
 
 alphaNum :: String
 alphaNum = ['A'..'Z'] ++ ['0'..'9']
+
+newtype Shawty = Shawty { unShawty :: BC.ByteString}
+newtype URI = URI { unURI :: BC.ByteString}
 
 randomElement :: String -> IO Char
 randomElement xs = do
@@ -25,19 +28,23 @@ randomElement xs = do
 
 shortyGen :: IO String
 shortyGen =
+  -- -- for testing existing shorty:
+  -- return "777"
   replicateM 7 (randomElement alphaNum)
 
 saveURI :: R.Connection
-        -> BC.ByteString
-        -> BC.ByteString
+        -> Shawty
+        -> URI
         -> IO (Either R.Reply R.Status)
 saveURI conn shortURI uri =
-  R.runRedis conn $ R.set shortURI uri
+  R.runRedis conn $ R.set (unShawty shortURI) (unURI uri)
 
 getURI  :: R.Connection
-        -> BC.ByteString
-        -> IO (Either R.Reply (Maybe BC.ByteString))
-getURI conn shortURI = R.runRedis conn $ R.get shortURI
+        -> Shawty
+        -> IO (Either R.Reply (Maybe URI))
+getURI conn shortURI =
+  (fmap . fmap . fmap) URI $
+    R.runRedis conn $ R.get (unShawty shortURI)
 
 linkShorty :: String -> String
 linkShorty shorty =
@@ -58,6 +65,9 @@ shortyAintUri uri =
             , " wasn't a url, did you forget http://?"
             ]
 
+shortyAlreadyExists :: TL.Text
+shortyAlreadyExists = "Generated shorty already existed, failed. Refresh to try again."
+
 shortyFound :: TL.Text -> TL.Text
 shortyFound tbs =
   TL.concat ["<a href=\"", tbs, "\">", tbs, "</a>"]
@@ -67,26 +77,30 @@ app :: R.Connection
 app rConn = do
   get "/" $ do
     uri <- param "uri"
-    let parsedUri :: Maybe URI
-        parsedUri = parseURI (TL.unpack uri)
+    let parsedUri :: Maybe U.URI
+        parsedUri = U.parseURI (TL.unpack uri)
     case parsedUri of
       Just _  -> do
         shawty <- liftIO shortyGen
-        let shorty = BC.pack shawty
-            uri' = encodeUtf8 (TL.toStrict uri)
-        resp <- liftIO (saveURI rConn shorty uri')
-        html (shortyCreated resp shawty)
+        let shorty = Shawty $ BC.pack shawty
+            uri' = URI $ encodeUtf8 (TL.toStrict uri)
+        oldUri <- liftIO $ getURI rConn shorty
+        case oldUri of
+          Right (Just _) -> text shortyAlreadyExists
+          _ -> do
+            resp <- liftIO (saveURI rConn shorty uri')
+            html (shortyCreated resp shawty)
       Nothing -> text (shortyAintUri uri)
   get "/:short" $ do
-    short <- param "short"
-    uri <- liftIO (getURI rConn short)
-    case uri of
+    short <- Shawty <$> param "short"
+    either <- liftIO (getURI rConn short)
+    case either of
       Left reply -> text (TL.pack (show reply))
-      Right mbBS -> case mbBS of
+      Right mbURI -> case mbURI of
         Nothing -> text "uri not found"
-        Just bs -> html (shortyFound tbs)
+        Just uri -> html (shortyFound tbs)
           where tbs :: TL.Text
-                tbs = TL.fromStrict (decodeUtf8 bs)
+                tbs = TL.fromStrict (decodeUtf8 (unURI uri))
 
 main :: IO ()
 main = do

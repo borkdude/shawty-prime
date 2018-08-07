@@ -2,15 +2,16 @@
 
 module Main where
 
-import Control.Monad (replicateM)
-import Control.Monad.IO.Class (liftIO)
+import           Control.Monad (replicateM)
+import           Control.Monad.IO.Class (liftIO)
+import           Control.Monad.Reader
 import qualified Data.ByteString.Char8 as BC
-import Data.Text.Encoding (decodeUtf8, encodeUtf8)
+import           Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import qualified Data.Text.Lazy as TL
 import qualified Database.Redis as R
 import qualified Network.URI as U (URI, parseURI)
 import qualified System.Random as SR
-import Web.Scotty
+import           Web.Scotty
 
 alphaNum :: String
 alphaNum = ['A'..'Z'] ++ ['0'..'9']
@@ -72,37 +73,43 @@ shortyFound :: TL.Text -> TL.Text
 shortyFound tbs =
   TL.concat ["<a href=\"", tbs, "\">", tbs, "</a>"]
 
-app :: R.Connection
-    -> ScottyM ()
-app rConn = do
-  get "/" $ do
-    uri <- param "uri"
-    let parsedUri :: Maybe U.URI
-        parsedUri = U.parseURI (TL.unpack uri)
-    case parsedUri of
-      Just _  -> do
-        shawty <- liftIO shortyGen
-        let shorty = Shawty $ BC.pack shawty
-            uri' = URI $ encodeUtf8 (TL.toStrict uri)
-        oldUri <- liftIO $ getURI rConn shorty
-        case oldUri of
-          Right (Just _) -> text shortyAlreadyExists
-          _ -> do
-            resp <- liftIO (saveURI rConn shorty uri')
-            html (shortyCreated resp shawty)
-      Nothing -> text (shortyAintUri uri)
-  get "/:short" $ do
-    short <- Shawty <$> param "short"
-    either <- liftIO (getURI rConn short)
-    case either of
-      Left reply -> text (TL.pack (show reply))
-      Right mbURI -> case mbURI of
-        Nothing -> text "uri not found"
-        Just uri -> html (shortyFound tbs)
-          where tbs :: TL.Text
-                tbs = TL.fromStrict (decodeUtf8 (unURI uri))
+app :: ReaderT R.Connection ScottyM ()
+app = do
+  rConn <- ask
+  let handler rConn = do
+        get "/" $ do
+          uri <- param "uri"
+          let parsedUri :: Maybe U.URI
+              parsedUri = U.parseURI (TL.unpack uri)
+          case parsedUri of
+            Just _  -> do
+              shawty <- liftIO shortyGen
+              let shorty = Shawty $ BC.pack shawty
+                  uri' = URI $ encodeUtf8 (TL.toStrict uri)
+              oldUri <- liftIO $ getURI rConn shorty
+              case oldUri of
+                Right (Just _) -> text shortyAlreadyExists
+                _ -> do
+                  resp <- liftIO (saveURI rConn shorty uri')
+                  html (shortyCreated resp shawty)
+            Nothing -> text (shortyAintUri uri)
+        get "/:short" $ do
+          short <- Shawty <$> param "short"
+          either <- liftIO (getURI rConn short)
+          case either of
+            Left reply -> text (TL.pack (show reply))
+            Right mbURI -> case mbURI of
+              Nothing -> text "uri not found"
+              Just uri -> html (shortyFound tbs)
+                where tbs :: TL.Text
+                      tbs = TL.fromStrict (decodeUtf8 (unURI uri))
+  lift $ handler rConn
 
 main :: IO ()
 main = do
   rConn <- R.connect R.defaultConnectInfo
-  scotty 3000 (app rConn)
+  let app' = runReaderT app rConn
+  scotty 3000 app'
+
+-- assignment: rewrite the app using ReaderT
+-- https://www.fpcomplete.com/blog/2017/06/readert-design-pattern

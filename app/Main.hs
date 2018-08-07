@@ -33,18 +33,17 @@ shortyGen =
   -- return "777"
   replicateM 7 (randomElement alphaNum)
 
-saveURI :: R.Connection
-        -> Shawty
-        -> URI
-        -> IO (Either R.Reply R.Status)
-saveURI conn shortURI uri =
-  R.runRedis conn $ R.set (unShawty shortURI) (unURI uri)
+saveURI :: Shawty -> URI
+        -> ReaderT R.Connection IO (Either R.Reply R.Status)
+saveURI shortURI uri = do
+  conn <- ask
+  lift $ R.runRedis conn $ R.set (unShawty shortURI) (unURI uri)
 
-getURI  :: R.Connection
-        -> Shawty
-        -> IO (Either R.Reply (Maybe URI))
-getURI conn shortURI =
-  (fmap . fmap . fmap) URI $
+getURI  :: Shawty
+        -> ReaderT R.Connection IO (Either R.Reply (Maybe URI))
+getURI shortURI = do
+  conn <- ask
+  lift $ (fmap . fmap . fmap) URI $
     R.runRedis conn $ R.get (unShawty shortURI)
 
 linkShorty :: String -> String
@@ -86,16 +85,17 @@ app = do
               shawty <- liftIO shortyGen
               let shorty = Shawty $ BC.pack shawty
                   uri' = URI $ encodeUtf8 (TL.toStrict uri)
-              oldUri <- liftIO $ getURI rConn shorty
+                  getOld = lift $ runReaderT (getURI shorty) rConn
+              oldUri <- getOld
               case oldUri of
                 Right (Just _) -> text shortyAlreadyExists
                 _ -> do
-                  resp <- liftIO (saveURI rConn shorty uri')
+                  resp <- lift $ runReaderT (saveURI shorty uri') rConn
                   html (shortyCreated resp shawty)
             Nothing -> text (shortyAintUri uri)
         get "/:short" $ do
           short <- Shawty <$> param "short"
-          either <- liftIO (getURI rConn short)
+          either <- lift $ runReaderT (getURI short) rConn
           case either of
             Left reply -> text (TL.pack (show reply))
             Right mbURI -> case mbURI of
